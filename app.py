@@ -576,7 +576,7 @@ def get_user_role(user_id):
             "user"
         )
 
-        except Exception as e:
+        except Exception
 
         st.error(f"Authorization database error: {e}")
 
