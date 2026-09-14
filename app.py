@@ -560,6 +560,9 @@ def get_user_role(user_id):
         )
 
         if not response.data:
+            st.error(
+                f"Profile not found for User ID: {user_id}"
+            )
             return None
 
         profile = response.data[0]
@@ -568,7 +571,9 @@ def get_user_role(user_id):
             "is_active",
             True
         ):
-
+            st.error(
+                f"Account is inactive: {profile.get('email', '')}"
+            )
             return None
 
         return profile.get(
@@ -576,9 +581,11 @@ def get_user_role(user_id):
             "user"
         )
 
-        except Exception
+    except Exception as e:
 
-        st.error(f"Authorization database error: {e}")
+        st.error(
+            f"Authorization database error: {e}"
+        )
 
         return None
 
