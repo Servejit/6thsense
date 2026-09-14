@@ -1990,7 +1990,7 @@ def show_login():
                 autocomplete="current-password"
             )
 
-                 login_button = st.form_submit_button(
+login_button = st.form_submit_button(
                 "Login",
                 use_container_width=True,
                 type="primary"
