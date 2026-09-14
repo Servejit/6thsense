@@ -1118,6 +1118,790 @@ if supabase is None:
 # ============================================================
 #                    END OF PART 1
 # ============================================================
+# ============================================================
+# 6thSense (6S-FO200) Vardaan
+# STREAMLIT + SUPABASE SECURE APPLICATION
+#
+# PART 2 OF 5
+#
+# Contains:
+#   - Authentication startup
+#   - Login screen
+#   - Login protection
+#   - Logout
+#   - Sidebar
+#   - Admin/User role display
+#   - Session handling
+#
+# CONTINUES DIRECTLY FROM PART 1
+# ============================================================
+
+
+# ============================================================
+#                    AUTHENTICATION STARTUP
+# ============================================================
+
+def initialize_authentication():
+
+    """
+    Check whether a valid Supabase authentication session
+    already exists.
+
+    Returns:
+        True  -> authenticated
+        False -> not authenticated
+    """
+
+    # --------------------------------------------------------
+    # If Streamlit already knows that the user is authenticated,
+    # still verify the Supabase user.
+    # --------------------------------------------------------
+
+    if st.session_state.get(
+        "authenticated",
+        False
+    ):
+
+        user = get_current_user()
+
+        if user is None:
+
+            st.session_state.user = None
+            st.session_state.session = None
+            st.session_state.profile = None
+            st.session_state.is_admin = False
+            st.session_state.authenticated = False
+
+            return False
+
+
+        # Refresh role/profile information.
+
+        return refresh_authenticated_user()
+
+
+    # --------------------------------------------------------
+    # Check whether Supabase has an existing session.
+    # --------------------------------------------------------
+
+    session = get_current_session()
+
+    if session is None:
+
+        return False
+
+
+    # --------------------------------------------------------
+    # A session may exist but the user may no longer be valid.
+    # --------------------------------------------------------
+
+    user = get_current_user()
+
+    if user is None:
+
+        return False
+
+
+    # --------------------------------------------------------
+    # Store authenticated information.
+    # --------------------------------------------------------
+
+    return refresh_authenticated_user()
+
+
+# ============================================================
+#                    LOGIN RATE LIMIT
+# ============================================================
+
+
+def login_rate_limit_ok():
+
+    """
+    Basic application-side login throttling.
+
+    Supabase Auth also provides its own protections.
+    This adds a small additional layer against rapid repeated
+    login attempts from the same Streamlit session.
+    """
+
+    now = time.time()
+
+    last_time = float(
+        st.session_state.get(
+            "last_login_time",
+            0.0
+        )
+    )
+
+    attempts = int(
+        st.session_state.get(
+            "login_attempts",
+            0
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Reset attempts after a quiet period.
+    # --------------------------------------------------------
+
+    if (
+        last_time > 0
+        and now - last_time > 300
+    ):
+
+        st.session_state.login_attempts = 0
+
+        attempts = 0
+
+
+    # --------------------------------------------------------
+    # Allow up to 5 attempts in the current session window.
+    # --------------------------------------------------------
+
+    if attempts >= 5:
+
+        if now - last_time < 300:
+
+            return False
+
+
+        st.session_state.login_attempts = 0
+
+        return True
+
+
+    return True
+
+
+# ============================================================
+#                    RECORD LOGIN ATTEMPT
+# ============================================================
+
+
+def record_login_attempt():
+
+    st.session_state.login_attempts = (
+        int(
+            st.session_state.get(
+                "login_attempts",
+                0
+            )
+        )
+        + 1
+    )
+
+    st.session_state.last_login_time = (
+        time.time()
+    )
+
+
+# ============================================================
+#                    LOGIN FORM
+# ============================================================
+
+
+def show_login_screen():
+
+    """
+    Display the login page.
+
+    Users and administrators use the same Supabase
+    authentication mechanism.
+
+    Authorization is determined from the profiles table
+    after successful authentication.
+    """
+
+    show_application_header()
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # Center-like layout
+    # --------------------------------------------------------
+
+    left, center, right = st.columns(
+        [1, 2, 1]
+    )
+
+
+    with center:
+
+        st.subheader(
+            "Login"
+        )
+
+        st.write(
+            "Sign in with your authorized account."
+        )
+
+
+        # ----------------------------------------------------
+        # Existing login error
+        # ----------------------------------------------------
+
+        previous_error = (
+            st.session_state.get(
+                "last_error"
+            )
+        )
+
+
+        if previous_error:
+
+            st.error(
+                previous_error
+            )
+
+            st.session_state.last_error = None
+
+
+        # ----------------------------------------------------
+        # Login form
+        # ----------------------------------------------------
+
+        with st.form(
+            "login_form",
+            clear_on_submit=False
+        ):
+
+            email = st.text_input(
+                "Email",
+                placeholder="Enter your email",
+                autocomplete="email",
+            )
+
+
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Enter your password",
+                autocomplete="current-password",
+            )
+
+
+            login_button = st.form_submit_button(
+                "Login",
+                use_container_width=True,
+                type="primary",
+            )
+
+
+        # ----------------------------------------------------
+        # Process login
+        # ----------------------------------------------------
+
+        if login_button:
+
+            # -----------------------------------------------
+            # Rate limit
+            # -----------------------------------------------
+
+            if not login_rate_limit_ok():
+
+                st.error(
+                    """
+                    Too many login attempts.
+
+                    Please wait a few minutes and try again.
+                    """
+                )
+
+                return
+
+
+            record_login_attempt()
+
+
+            # -----------------------------------------------
+            # Clean input
+            # -----------------------------------------------
+
+            email = clean_text(
+                email,
+                320
+            ).lower()
+
+
+            # -----------------------------------------------
+            # Validate email before contacting Supabase
+            # -----------------------------------------------
+
+            if not is_valid_email(
+                email
+            ):
+
+                st.error(
+                    "Please enter a valid email address."
+                )
+
+                return
+
+
+            if not password:
+
+                st.error(
+                    "Please enter your password."
+                )
+
+                return
+
+
+            # -----------------------------------------------
+            # Authenticate
+            # -----------------------------------------------
+
+            with st.spinner(
+                "Signing in..."
+            ):
+
+                success, user, session, error = (
+                    sign_in_user(
+                        email,
+                        password
+                    )
+                )
+
+
+            # -----------------------------------------------
+            # Login failed
+            # -----------------------------------------------
+
+            if not success:
+
+                st.error(
+                    error
+                    or
+                    "Invalid email or password."
+                )
+
+                return
+
+
+            # -----------------------------------------------
+            # Authentication succeeded.
+            #
+            # IMPORTANT:
+            # Authentication does NOT automatically mean the
+            # person is an authorized application user.
+            #
+            # The profile/role is checked next.
+            # -----------------------------------------------
+
+            st.session_state.user = user
+
+            st.session_state.session = session
+
+            st.session_state.authenticated = True
+
+
+            # -----------------------------------------------
+            # Verify application profile and role.
+            # -----------------------------------------------
+
+            authorized = (
+                refresh_authenticated_user()
+            )
+
+
+            if not authorized:
+
+                # refresh_authenticated_user() already clears
+                # the authentication state when the account is
+                # not authorized.
+
+                st.error(
+                    st.session_state.get(
+                        "last_error"
+                    )
+                    or
+                    "Your account is not authorized."
+                )
+
+                return
+
+
+            # -----------------------------------------------
+            # Successful login
+            # -----------------------------------------------
+
+            st.session_state.login_attempts = 0
+
+            st.session_state.last_login_time = 0.0
+
+            st.session_state.last_error = None
+
+
+            # -----------------------------------------------
+            # Rerun so the login page disappears immediately.
+            # -----------------------------------------------
+
+            st.rerun()
+
+
+# ============================================================
+#                    LOGOUT FUNCTION
+# ============================================================
+
+
+def logout_user():
+
+    """
+    Complete logout.
+
+    This clears both the Supabase authentication session and
+    the Streamlit-side application state.
+    """
+
+    try:
+
+        if supabase is not None:
+
+            supabase.auth.sign_out()
+
+    except Exception:
+
+        pass
+
+
+    # --------------------------------------------------------
+    # Clear all sensitive authentication-related state.
+    # --------------------------------------------------------
+
+    keys_to_clear = [
+        "user",
+        "session",
+        "profile",
+        "generated_output",
+        "last_error",
+    ]
+
+
+    for key in keys_to_clear:
+
+        if key in st.session_state:
+
+            st.session_state[key] = None
+
+
+    st.session_state.is_admin = False
+
+    st.session_state.authenticated = False
+
+    st.session_state.master_file_exists = False
+
+
+    # --------------------------------------------------------
+    # Clear login throttling information.
+    # --------------------------------------------------------
+
+    st.session_state.login_attempts = 0
+
+    st.session_state.last_login_time = 0.0
+
+
+# ============================================================
+#                    SIDEBAR
+# ============================================================
+
+
+def show_sidebar():
+
+    """
+    Sidebar shown only after authentication.
+    """
+
+    user = st.session_state.get(
+        "user"
+    )
+
+    if user is None:
+
+        return
+
+
+    email = get_user_email(
+        user
+    )
+
+
+    is_admin = bool(
+        st.session_state.get(
+            "is_admin",
+            False
+        )
+    )
+
+
+    with st.sidebar:
+
+        st.markdown(
+            "## 6thSense"
+        )
+
+        st.caption(
+            "6S-FO200 Vardaan"
+        )
+
+        st.divider()
+
+
+        # ----------------------------------------------------
+        # User information
+        # ----------------------------------------------------
+
+        st.write(
+            f"**User:** {email}"
+        )
+
+
+        if is_admin:
+
+            st.success(
+                "ADMIN ACCESS"
+            )
+
+            st.write(
+                "**Role:** Admin"
+            )
+
+        else:
+
+            st.info(
+                "USER ACCESS — Read-only"
+            )
+
+            st.write(
+                "**Role:** User"
+            )
+
+
+        st.divider()
+
+
+        # ----------------------------------------------------
+        # Logout button
+        # ----------------------------------------------------
+
+        if st.button(
+            "Logout",
+            use_container_width=True,
+            key="sidebar_logout_button",
+        ):
+
+            logout_user()
+
+            st.rerun()
+
+
+# ============================================================
+#                    AUTHENTICATION GATE
+# ============================================================
+#
+# Nothing below this section should be accessible until the
+# user has passed authentication and application authorization.
+#
+# ============================================================
+
+
+authenticated = initialize_authentication()
+
+
+# ============================================================
+#                    SHOW LOGIN OR APPLICATION
+# ============================================================
+
+
+if not authenticated:
+
+    show_login_screen()
+
+    st.stop()
+
+
+# ============================================================
+#                    RECHECK USER
+# ============================================================
+
+
+user = st.session_state.get(
+    "user"
+)
+
+
+if user is None:
+
+    st.session_state.authenticated = False
+
+    show_login_screen()
+
+    st.stop()
+
+
+# ============================================================
+#                    RECHECK USER PROFILE
+# ============================================================
+#
+# Do not trust only the Streamlit session value.
+# The role is refreshed from Supabase.
+#
+# ============================================================
+
+
+user_id = get_user_id(
+    user
+)
+
+
+if not user_id:
+
+    logout_user()
+
+    st.error(
+        "Authentication could not be verified."
+    )
+
+    st.stop()
+
+
+profile = get_user_profile(
+    user_id
+)
+
+
+if profile is None:
+
+    logout_user()
+
+    st.error(
+        "Your application authorization could not be verified."
+    )
+
+    st.stop()
+
+
+# ============================================================
+#                    ACTIVE ACCOUNT CHECK
+# ============================================================
+
+
+account_is_active = profile.get(
+    "is_active",
+    True
+)
+
+
+if not account_is_active:
+
+    logout_user()
+
+    st.error(
+        "Your account has been disabled."
+    )
+
+    st.stop()
+
+
+# ============================================================
+#                    ROLE CHECK
+# ============================================================
+
+
+role = clean_text(
+    profile.get(
+        "role",
+        USER_ROLE
+    ),
+    50
+).lower()
+
+
+if role not in {
+    ADMIN_ROLE,
+    USER_ROLE,
+}:
+
+    role = USER_ROLE
+
+
+# ------------------------------------------------------------
+# Store only the verified role.
+# ------------------------------------------------------------
+
+st.session_state.profile = profile
+
+st.session_state.is_admin = (
+    role == ADMIN_ROLE
+)
+
+st.session_state.authenticated = True
+
+
+# ============================================================
+#                    SIDEBAR
+# ============================================================
+
+
+show_sidebar()
+
+
+# ============================================================
+#                    LOGGED-IN USER
+# ============================================================
+
+
+user = st.session_state.user
+
+
+st.title(
+    "6thSense (6S-FO200) Vardaan"
+)
+
+
+st.caption(
+    f"Logged in as: {get_user_email(user)}"
+)
+
+
+# ============================================================
+#                    ACCESS STATUS
+# ============================================================
+
+
+if st.session_state.is_admin:
+
+    st.success(
+        "ADMIN ACCESS"
+    )
+
+else:
+
+    st.info(
+        "USER ACCESS — Read-only"
+    )
+
+
+# ============================================================
+#                    END OF PART 2
+# ============================================================
+#
+# >>> PART 3 STARTS DIRECTLY HERE <<<
+#
+# Part 3 will contain:
+#
+#   - Admin-only controls
+#   - Master Excel upload
+#   - Replace master file
+#   - Delete master file
+#   - Supabase Storage operations
+#   - Master file metadata
+#   - User management controls
+#
+# IMPORTANT:
+# Users will NOT receive any admin controls.
+#
+# ============================================================
 #
 # >>> PART 2 STARTS DIRECTLY HERE <<<
 #
