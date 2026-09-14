@@ -2774,7 +2774,7 @@ def admin_settings_panel():
 
     with col1:
 
-    light_blue = st.text_input(
+        light_blue = st.text_input(
         "Light Blue HEX",
             value=settings.get(
                 "light_blue",
