@@ -541,9 +541,9 @@ def get_authenticated_user():
 
         return response.user
 
-    except Exception:
-
-        return None
+    except Exception as e:
+    st.error(f"Authorization check failed: {e}")
+    return None
 
 
 def get_user_role(user_id):
