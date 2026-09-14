@@ -1916,3 +1916,3573 @@ else:
 #   - Session protection
 #
 # ============================================================
+# ============================================================
+# 6thSense (6S-FO200) Vardaan
+# STREAMLIT + SUPABASE SECURE APPLICATION
+#
+# PART 3 OF 5
+#
+# Contains:
+#   - Supabase Storage helpers
+#   - Master Excel upload
+#   - Replace master Excel
+#   - Delete master Excel
+#   - Master file metadata
+#   - Admin-only user management
+#   - Create user
+#   - Enable / disable user
+#   - Change user role
+#
+# CONTINUES DIRECTLY FROM PART 2
+# ============================================================
+
+
+# ============================================================
+#                    STORAGE CONSTANTS
+# ============================================================
+
+STORAGE_BUCKET = "master-files"
+
+MASTER_STORAGE_PATH = "master/master.xlsx"
+
+
+# ============================================================
+#                    ADMIN SECURITY CHECK
+# ============================================================
+
+
+def verify_admin_access():
+
+    """
+    Perform a fresh role check against Supabase.
+
+    IMPORTANT:
+    Streamlit session_state is never treated as the final
+    authority for administrative operations.
+    """
+
+    user = st.session_state.get(
+        "user"
+    )
+
+    if user is None:
+
+        return False
+
+
+    user_id = get_user_id(
+        user
+    )
+
+    if not user_id:
+
+        return False
+
+
+    # Fresh database role check.
+
+    profile = get_user_profile(
+        user_id
+    )
+
+
+    if profile is None:
+
+        return False
+
+
+    if not profile.get(
+        "is_active",
+        True
+    ):
+
+        return False
+
+
+    role = clean_text(
+        profile.get(
+            "role",
+            ""
+        ),
+        50
+    ).lower()
+
+
+    return role == ADMIN_ROLE
+
+
+# ============================================================
+#                    STORAGE BUCKET CHECK
+# ============================================================
+
+
+def ensure_storage_bucket():
+
+    """
+    Check that the expected Supabase Storage bucket exists.
+
+    Bucket creation should normally be done from Supabase
+    Dashboard/SQL configuration rather than allowing arbitrary
+    bucket creation from the application.
+    """
+
+    require_supabase()
+
+    try:
+
+        buckets = supabase.storage.list_buckets()
+
+        if buckets is None:
+
+            return False
+
+
+        for bucket in buckets:
+
+            # Supabase Python clients can return dictionaries
+            # or objects depending on the installed version.
+
+            if isinstance(
+                bucket,
+                dict
+            ):
+
+                bucket_name = bucket.get(
+                    "name",
+                    ""
+                )
+
+            else:
+
+                bucket_name = getattr(
+                    bucket,
+                    "name",
+                    ""
+                )
+
+
+            if bucket_name == STORAGE_BUCKET:
+
+                return True
+
+
+        return False
+
+
+    except Exception:
+
+        return False
+
+
+# ============================================================
+#                    DOWNLOAD MASTER FILE
+# ============================================================
+
+
+def download_master_file():
+
+    """
+    Download the currently stored master workbook from
+    Supabase Storage.
+
+    Returns:
+        bytes or None
+    """
+
+    require_supabase()
+
+
+    try:
+
+        file_bytes = (
+            supabase
+            .storage
+            .from_(STORAGE_BUCKET)
+            .download(
+                MASTER_STORAGE_PATH
+            )
+        )
+
+
+        if not file_bytes:
+
+            return None
+
+
+        return file_bytes
+
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+#                    CHECK MASTER FILE
+# ============================================================
+
+
+def master_file_available():
+
+    """
+    Check whether the master workbook exists in Storage.
+    """
+
+    file_bytes = download_master_file()
+
+    return file_bytes is not None
+
+
+# ============================================================
+#                    UPLOAD / REPLACE MASTER FILE
+# ============================================================
+
+
+def upload_master_file(
+    file_bytes
+):
+
+    """
+    Replace the existing master workbook.
+
+    This function MUST only be called after verify_admin_access()
+    succeeds.
+    """
+
+    require_supabase()
+
+
+    if not verify_admin_access():
+
+        return (
+            False,
+            "Administrative authorization failed."
+        )
+
+
+    if not file_bytes:
+
+        return (
+            False,
+            "The uploaded file is empty."
+        )
+
+
+    # --------------------------------------------------------
+    # Validate workbook before uploading.
+    # --------------------------------------------------------
+
+    try:
+
+        test_buffer = io.BytesIO(
+            file_bytes
+        )
+
+        workbook = load_workbook(
+            test_buffer,
+            read_only=True,
+            data_only=False
+        )
+
+        workbook.close()
+
+    except Exception:
+
+        return (
+            False,
+            "The selected file is not a valid Excel workbook."
+        )
+
+
+    # --------------------------------------------------------
+    # Calculate hash for metadata/logging.
+    # --------------------------------------------------------
+
+    file_hash = calculate_file_hash(
+        file_bytes
+    )
+
+
+    try:
+
+        response = (
+            supabase
+            .storage
+            .from_(STORAGE_BUCKET)
+            .upload(
+                MASTER_STORAGE_PATH,
+                file_bytes,
+                {
+                    "content-type":
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+                    "upsert":
+                        "true",
+                }
+            )
+        )
+
+
+        # Some Supabase versions return a response object and
+        # some return a dictionary. We don't rely on its exact
+        # shape here.
+        _ = response
+
+
+        # ----------------------------------------------------
+        # Store file metadata when the optional table exists.
+        # Failure of metadata logging should not make a
+        # successfully uploaded file unusable.
+        # ----------------------------------------------------
+
+        try:
+
+            admin_user = st.session_state.get(
+                "user"
+            )
+
+            admin_id = get_user_id(
+                admin_user
+            )
+
+            admin_email = get_user_email(
+                admin_user
+            )
+
+
+            (
+                supabase
+                .table("master_file_metadata")
+                .upsert(
+                    {
+                        "id": 1,
+                        "file_name": MASTER_FILE_NAME,
+                        "file_size": len(file_bytes),
+                        "file_hash": file_hash,
+                        "updated_by": admin_id,
+                        "updated_by_email": admin_email,
+                        "updated_at": utc_now(),
+                    }
+                )
+                .execute()
+            )
+
+        except Exception:
+
+            pass
+
+
+        # ----------------------------------------------------
+        # Update local state.
+        # ----------------------------------------------------
+
+        st.session_state.master_file_exists = True
+
+        st.session_state.master_file_name = (
+            MASTER_FILE_NAME
+        )
+
+
+        return (
+            True,
+            "Master file uploaded successfully."
+        )
+
+
+    except Exception:
+
+        return (
+            False,
+            "The master file could not be uploaded."
+        )
+
+
+# ============================================================
+#                    DELETE MASTER FILE
+# ============================================================
+
+
+def delete_master_file():
+
+    """
+    Delete the master workbook.
+
+    ADMIN ONLY.
+    """
+
+    require_supabase()
+
+
+    if not verify_admin_access():
+
+        return (
+            False,
+            "Administrative authorization failed."
+        )
+
+
+    try:
+
+        (
+            supabase
+            .storage
+            .from_(STORAGE_BUCKET)
+            .remove(
+                [
+                    MASTER_STORAGE_PATH
+                ]
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # Remove metadata.
+        # ----------------------------------------------------
+
+        try:
+
+            (
+                supabase
+                .table("master_file_metadata")
+                .delete()
+                .eq(
+                    "id",
+                    1
+                )
+                .execute()
+            )
+
+        except Exception:
+
+            pass
+
+
+        # ----------------------------------------------------
+        # Clear local state.
+        # ----------------------------------------------------
+
+        st.session_state.master_file_exists = False
+
+        st.session_state.generated_output = None
+
+
+        return (
+            True,
+            "Master file deleted successfully."
+        )
+
+
+    except Exception:
+
+        return (
+            False,
+            "The master file could not be deleted."
+        )
+
+
+# ============================================================
+#                    MASTER FILE INFORMATION
+# ============================================================
+
+
+def get_master_file_metadata():
+
+    """
+    Read metadata about the current master workbook.
+    """
+
+    require_supabase()
+
+
+    try:
+
+        response = (
+            supabase
+            .table("master_file_metadata")
+            .select(
+                "file_name,file_size,file_hash,updated_by_email,updated_at"
+            )
+            .eq(
+                "id",
+                1
+            )
+            .limit(1)
+            .execute()
+        )
+
+
+        data = getattr(
+            response,
+            "data",
+            None
+        )
+
+
+        if not data:
+
+            return None
+
+
+        return data[0]
+
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+#                    REFRESH MASTER STATUS
+# ============================================================
+
+
+def refresh_master_status():
+
+    exists = master_file_available()
+
+    st.session_state.master_file_exists = (
+        exists
+    )
+
+    return exists
+
+
+# ============================================================
+#                    USER MANAGEMENT HELPERS
+# ============================================================
+#
+# IMPORTANT:
+#
+# Supabase Auth user creation/deletion normally requires the
+# service_role key.
+#
+# The service_role key must NEVER be placed in Streamlit
+# frontend/session state or exposed to normal users.
+#
+# Therefore this application uses the safer architecture:
+#
+#   Supabase Auth -> authentication
+#   profiles      -> application role/status
+#
+# User administration below manages application profiles.
+#
+# Creating the actual Auth account can be done through the
+# Supabase Dashboard or through a secure server-side admin
+# mechanism.
+#
+# We intentionally do NOT expose the service_role key here.
+#
+# ============================================================
+
+
+def get_all_profiles():
+
+    """
+    Retrieve application users.
+
+    ADMIN ONLY.
+    """
+
+    require_supabase()
+
+
+    if not verify_admin_access():
+
+        return []
+
+
+    try:
+
+        response = (
+            supabase
+            .table("profiles")
+            .select(
+                "id,email,role,is_active"
+            )
+            .order(
+                "email"
+            )
+            .execute()
+        )
+
+
+        data = getattr(
+            response,
+            "data",
+            None
+        )
+
+
+        if not data:
+
+            return []
+
+
+        return data
+
+
+    except Exception:
+
+        return []
+
+
+# ============================================================
+#                    UPDATE USER ROLE
+# ============================================================
+
+
+def update_user_role(
+    user_id,
+    new_role
+):
+
+    """
+    Change application role.
+
+    ADMIN ONLY.
+    """
+
+    require_supabase()
+
+
+    if not verify_admin_access():
+
+        return (
+            False,
+            "Administrative authorization failed."
+        )
+
+
+    user_id = clean_text(
+        user_id,
+        100
+    )
+
+
+    new_role = clean_text(
+        new_role,
+        50
+    ).lower()
+
+
+    if not user_id:
+
+        return (
+            False,
+            "Invalid user."
+        )
+
+
+    if new_role not in {
+        ADMIN_ROLE,
+        USER_ROLE,
+    }:
+
+        return (
+            False,
+            "Invalid role."
+        )
+
+
+    current_admin_id = get_user_id()
+
+
+    # --------------------------------------------------------
+    # Prevent accidental removal of your own admin role.
+    # --------------------------------------------------------
+
+    if (
+        user_id
+        ==
+        current_admin_id
+        and
+        new_role != ADMIN_ROLE
+    ):
+
+        return (
+            False,
+            "You cannot remove your own admin role."
+        )
+
+
+    try:
+
+        (
+            supabase
+            .table("profiles")
+            .update(
+                {
+                    "role": new_role
+                }
+            )
+            .eq(
+                "id",
+                user_id
+            )
+            .execute()
+        )
+
+
+        return (
+            True,
+            "User role updated."
+        )
+
+
+    except Exception:
+
+        return (
+            False,
+            "User role could not be updated."
+        )
+
+
+# ============================================================
+#                    ENABLE / DISABLE USER
+# ============================================================
+
+
+def update_user_status(
+    user_id,
+    active
+):
+
+    """
+    Enable or disable an application's user profile.
+
+    ADMIN ONLY.
+    """
+
+    require_supabase()
+
+
+    if not verify_admin_access():
+
+        return (
+            False,
+            "Administrative authorization failed."
+        )
+
+
+    user_id = clean_text(
+        user_id,
+        100
+    )
+
+
+    if not user_id:
+
+        return (
+            False,
+            "Invalid user."
+        )
+
+
+    current_admin_id = get_user_id()
+
+
+    # --------------------------------------------------------
+    # Prevent the currently logged-in administrator from
+    # disabling their own account.
+    # --------------------------------------------------------
+
+    if (
+        user_id
+        ==
+        current_admin_id
+        and
+        not bool(active)
+    ):
+
+        return (
+            False,
+            "You cannot disable your own account."
+        )
+
+
+    try:
+
+        (
+            supabase
+            .table("profiles")
+            .update(
+                {
+                    "is_active": bool(active)
+                }
+            )
+            .eq(
+                "id",
+                user_id
+            )
+            .execute()
+        )
+
+
+        return (
+            True,
+            "User status updated."
+        )
+
+
+    except Exception:
+
+        return (
+            False,
+            "User status could not be updated."
+        )
+
+
+# ============================================================
+#                    ADMIN MASTER FILE PANEL
+# ============================================================
+
+
+def show_master_file_admin_panel():
+
+    """
+    Display master workbook controls.
+
+    This function is called only for verified administrators.
+    """
+
+    # --------------------------------------------------------
+    # SECOND authorization check.
+    # --------------------------------------------------------
+
+    if not verify_admin_access():
+
+        st.error(
+            "Administrator authorization failed."
+        )
+
+        return
+
+
+    st.header(
+        "Master File Management"
+    )
+
+
+    st.caption(
+        "Only administrators can upload, replace, or delete the master file."
+    )
+
+
+    # --------------------------------------------------------
+    # Current file status
+    # --------------------------------------------------------
+
+    exists = refresh_master_status()
+
+
+    if exists:
+
+        st.success(
+            "Master file is available."
+        )
+
+    else:
+
+        st.warning(
+            "No master file is currently available."
+        )
+
+
+    # --------------------------------------------------------
+    # File uploader
+    # --------------------------------------------------------
+
+    uploaded_file = st.file_uploader(
+        "Upload / Replace Master Excel File",
+        type=[
+            "xlsx",
+            "xlsm"
+        ],
+        key="admin_master_file_uploader",
+    )
+
+
+    if uploaded_file is not None:
+
+        valid, error_message = (
+            validate_excel_upload(
+                uploaded_file
+            )
+        )
+
+
+        if not valid:
+
+            st.error(
+                error_message
+            )
+
+        else:
+
+            # ------------------------------------------------
+            # Show file details before the destructive replace.
+            # ------------------------------------------------
+
+            st.write(
+                f"**Selected file:** {uploaded_file.name}"
+            )
+
+            st.write(
+                f"**Size:** {uploaded_file.size:,} bytes"
+            )
+
+
+            replace_confirmed = st.checkbox(
+                "I confirm that this file should replace the current master file.",
+                key="confirm_master_replace",
+            )
+
+
+            if st.button(
+                "Upload / Replace Master File",
+                type="primary",
+                use_container_width=True,
+                key="replace_master_button",
+            ):
+
+                if not replace_confirmed:
+
+                    st.warning(
+                        "Please confirm the replacement first."
+                    )
+
+                else:
+
+                    # ----------------------------------------
+                    # Read bytes once.
+                    # ----------------------------------------
+
+                    file_bytes = (
+                        uploaded_file.getvalue()
+                    )
+
+
+                    # ----------------------------------------
+                    # Final authorization immediately before
+                    # write operation.
+                    # ----------------------------------------
+
+                    if not verify_admin_access():
+
+                        st.error(
+                            "Administrator authorization failed."
+                        )
+
+                    else:
+
+                        with st.spinner(
+                            "Uploading master file..."
+                        ):
+
+                            success, message = (
+                                upload_master_file(
+                                    file_bytes
+                                )
+                            )
+
+
+                        if success:
+
+                            st.success(
+                                message
+                            )
+
+                            # Clear confirmation/uploader state
+                            # after successful replacement.
+
+                            st.session_state.confirm_master_replace = False
+
+                            st.session_state.generated_output = None
+
+                            st.rerun()
+
+                        else:
+
+                            st.error(
+                                message
+                            )
+
+
+        # Delete current master file
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.subheader(
+        "Delete Master File"
+    )
+
+
+    if exists:
+
+        delete_confirmed = st.checkbox(
+            "I understand that deleting the master file will remove the current source workbook.",
+            key="confirm_delete_master"
+        )
+
+
+        if st.button(
+            "Delete Current Master File",
+            key="delete_master_file",
+            use_container_width=True
+        ):
+
+            if not delete_confirmed:
+
+                st.warning(
+                    "Please confirm that you want to delete the current master file."
+                )
+
+            else:
+
+                try:
+
+                    # ------------------------------------------------
+                    # Security check — Admin only
+                    # ------------------------------------------------
+
+                    if not verify_admin_access():
+
+                        st.error(
+                            "Administrator access is required."
+                        )
+
+                    else:
+
+                        with st.spinner(
+                            "Deleting current master file..."
+                        ):
+
+                            supabase.storage \
+                                .from_(STORAGE_BUCKET) \
+                                .remove(
+                                    [
+                                        MASTER_STORAGE_PATH
+                                    ]
+                                )
+
+
+                            # ----------------------------------------
+                            # Delete metadata record
+                            # ----------------------------------------
+
+                            try:
+
+                                (
+                                    supabase
+                                    .table(
+                                        "master_file_metadata"
+                                    )
+                                    .delete()
+                                    .eq(
+                                        "storage_path",
+                                        MASTER_STORAGE_PATH
+                                    )
+                                    .execute()
+                                )
+
+                            except Exception:
+
+                                # Metadata deletion failure should
+                                # not hide successful storage deletion.
+                                pass
+
+
+                        # --------------------------------------------
+                        # Clear application state
+                        # --------------------------------------------
+
+                        st.session_state.master_file_exists = False
+
+                        st.session_state.master_file_name = None
+
+                        st.session_state.generated_output = None
+
+                        st.session_state.generated_output_name = None
+
+
+                        st.success(
+                            "Current master file deleted successfully."
+                        )
+
+
+                        time.sleep(
+                            0.8
+                        )
+
+                        st.rerun()
+
+
+                except Exception as e:
+
+                    st.error(
+                        "Unable to delete the master file."
+                    )
+
+                    st.caption(
+                        str(e)
+                    )
+
+
+    else:
+
+        st.info(
+            "No master file is currently available to delete."
+        )
+    # ============================================================
+#              MASTER FILE METADATA
+# ============================================================
+
+def get_master_file_metadata():
+
+    try:
+
+        response = (
+            supabase
+            .table(
+                "master_file_metadata"
+            )
+            .select(
+                "*"
+            )
+            .eq(
+                "storage_path",
+                MASTER_STORAGE_PATH
+            )
+            .limit(
+                1
+            )
+            .execute()
+        )
+
+
+        if response.data:
+
+            return response.data[0]
+
+
+        return None
+
+
+    except Exception:
+
+        return None
+    # ============================================================
+#              REFRESH MASTER FILE STATUS
+# ============================================================
+
+def refresh_master_status():
+
+    try:
+
+        exists = master_file_available()
+
+
+        st.session_state.master_file_exists = (
+            exists
+        )
+
+
+        if exists:
+
+            st.session_state.master_file_name = (
+                MASTER_FILE_NAME
+            )
+
+        else:
+
+            st.session_state.master_file_name = None
+
+
+        return exists
+
+
+    except Exception:
+
+        st.session_state.master_file_exists = False
+
+        st.session_state.master_file_name = None
+
+        return False
+    # ============================================================
+#                    USER MANAGEMENT
+# ============================================================
+
+def get_all_profiles():
+
+    # --------------------------------------------------------
+    # Security check
+    # --------------------------------------------------------
+
+    if not verify_admin_access():
+
+        return []
+
+
+    try:
+
+        response = (
+            supabase
+            .table(
+                "profiles"
+            )
+            .select(
+                "id,email,role,is_active,created_at"
+            )
+            .order(
+                "created_at",
+                desc=False
+            )
+            .execute()
+        )
+
+
+        return response.data or []
+
+
+    except Exception as e:
+
+        show_safe_error(
+            "Unable to load users.",
+            e
+        )
+
+        return []
+    # ============================================================
+#                  UPDATE USER ROLE
+# ============================================================
+
+def update_user_role(
+    user_id,
+    new_role
+):
+
+    # --------------------------------------------------------
+    # Security check — Admin only
+    # --------------------------------------------------------
+
+    if not verify_admin_access():
+
+        return (
+            False,
+            "Administrator access is required."
+        )
+
+
+    # --------------------------------------------------------
+    # Validate requested role
+    # --------------------------------------------------------
+
+    if new_role not in ROLES:
+
+        return (
+            False,
+            "Invalid user role."
+        )
+
+
+    current_user_id = get_user_id()
+
+
+    # --------------------------------------------------------
+    # Safety:
+    # Admin cannot remove their own administrator role
+    # --------------------------------------------------------
+
+    if str(user_id) == str(current_user_id):
+
+        if new_role != "admin":
+
+            return (
+                False,
+                "You cannot remove your own admin role."
+            )
+
+
+    try:
+
+        response = (
+            supabase
+            .table(
+                "profiles"
+            )
+            .update(
+                {
+                    "role": new_role
+                }
+            )
+            .eq(
+                "id",
+                user_id
+            )
+            .execute()
+        )
+
+
+        return (
+            True,
+            "User role updated successfully."
+        )
+
+
+    except Exception as e:
+
+        return (
+            False,
+            f"Unable to update user role: {e}"
+    )
+# ============================================================
+#              UPDATE USER STATUS
+# ============================================================
+
+def update_user_status(
+    user_id,
+    active
+):
+
+    # --------------------------------------------------------
+    # Security check — Admin only
+    # --------------------------------------------------------
+
+    if not verify_admin_access():
+
+        return (
+            False,
+            "Administrator access is required."
+        )
+
+
+    current_user_id = get_user_id()
+
+
+    # --------------------------------------------------------
+    # Safety:
+    # Admin cannot disable their own account
+    # --------------------------------------------------------
+
+    if str(user_id) == str(current_user_id):
+
+        if not active:
+
+            return (
+                False,
+                "You cannot disable your own account."
+            )
+
+
+    try:
+
+        response = (
+            supabase
+            .table(
+                "profiles"
+            )
+            .update(
+                {
+                    "is_active": bool(active)
+                }
+            )
+            .eq(
+                "id",
+                user_id
+            )
+            .execute()
+        )
+
+
+        return (
+            True,
+            "User status updated successfully."
+        )
+
+
+    except Exception as e:
+
+        return (
+            False,
+            f"Unable to update user status: {e}"
+        )
+# ============================================================
+#              ADMIN USER MANAGEMENT PANEL
+# ============================================================
+
+def show_user_management_panel():
+
+    # --------------------------------------------------------
+    # Security check
+    # --------------------------------------------------------
+
+    if not verify_admin_access():
+
+        st.error(
+            "Administrator access is required."
+        )
+
+        return
+
+
+    st.subheader(
+        "User Management"
+    )
+
+    st.caption(
+        "Admin can change user roles and enable or disable "
+        "application access."
+    )
+
+
+    # --------------------------------------------------------
+    # Load users
+    # --------------------------------------------------------
+
+    profiles = get_all_profiles()
+
+
+    if not profiles:
+
+        st.info(
+            "No users found."
+        )
+
+        return
+
+
+    current_user_id = get_user_id()
+
+
+    # --------------------------------------------------------
+    # Display users
+    # --------------------------------------------------------
+
+    for profile in profiles:
+
+        user_id = profile.get(
+            "id"
+        )
+
+        email = profile.get(
+            "email",
+            "Unknown"
+        )
+
+        current_role = profile.get(
+            "role",
+            "user"
+        )
+
+        current_status = profile.get(
+            "is_active",
+            True
+        )
+
+        created_at = profile.get(
+            "created_at",
+            ""
+        )
+
+
+        with st.container(
+            border=True
+        ):
+
+            st.markdown(
+                f"### {email}"
+            )
+
+
+            if str(user_id) == str(
+                current_user_id
+            ):
+
+                st.caption(
+                    "Current logged-in administrator"
+                )
+
+
+            # ------------------------------------------------
+            # User information
+            # ------------------------------------------------
+
+            info_col1, info_col2 = st.columns(
+                2
+            )
+
+
+            with info_col1:
+
+                st.write(
+                    f"**Current Role:** "
+                    f"{current_role}"
+                )
+
+
+            with info_col2:
+
+                status_text = (
+                    "Active"
+                    if current_status
+                    else "Disabled"
+                )
+
+                st.write(
+                    f"**Current Status:** "
+                    f"{status_text}"
+                )
+
+
+            if created_at:
+
+                st.caption(
+                    f"Account created: {created_at}"
+                )
+
+
+            st.divider()
+
+
+            # ------------------------------------------------
+            # Controls
+            # ------------------------------------------------
+
+            control_col1, control_col2 = st.columns(
+                2
+            )
+
+
+            with control_col1:
+
+                selected_role = st.selectbox(
+                    "Role",
+                    options=[
+                        "user",
+                        "admin"
+                    ],
+                    index=(
+                        1
+                        if current_role == "admin"
+                        else 0
+                    ),
+                    key=f"user_role_{user_id}"
+                )
+
+
+            with control_col2:
+
+                selected_status = st.selectbox(
+                    "Account Status",
+                    options=[
+                        "Active",
+                        "Disabled"
+                    ],
+                    index=(
+                        0
+                        if current_status
+                        else 1
+                    ),
+                    key=f"user_status_{user_id}"
+                )
+
+
+            # ------------------------------------------------
+            # Save buttons
+            # ------------------------------------------------
+
+            save_col1, save_col2 = st.columns(
+                2
+            )
+
+
+            with save_col1:
+
+                if st.button(
+                    "Save Role",
+                    key=f"save_role_{user_id}",
+                    use_container_width=True
+                ):
+
+                    success, message = (
+                        update_user_role(
+                            user_id,
+                            selected_role
+                        )
+                    )
+
+
+                    if success:
+
+                        st.success(
+                            message
+                        )
+
+                        time.sleep(
+                            0.5
+                        )
+
+                        st.rerun()
+
+                    else:
+
+                        st.error(
+                            message
+                        )
+
+
+            with save_col2:
+
+                if st.button(
+                    "Save Status",
+                    key=f"save_status_{user_id}",
+                    use_container_width=True
+                ):
+
+                    active_value = (
+                        selected_status == "Active"
+                    )
+
+
+                    success, message = (
+                        update_user_status(
+                            user_id,
+                            active_value
+                        )
+                    )
+
+
+                    if success:
+
+                        st.success(
+                            message
+                        )
+
+                        time.sleep(
+                            0.5
+                        )
+
+                        st.rerun()
+
+                    else:
+
+                        st.error(
+                            message
+                        )
+
+
+            st.divider()
+        # ============================================================
+#                 ADMIN CONTROL NAVIGATION
+# ============================================================
+
+if st.session_state.is_admin:
+
+    st.divider()
+
+    st.header(
+        "Administrator Controls"
+    )
+
+    # --------------------------------------------------------
+    # Fresh administrator verification
+    # --------------------------------------------------------
+
+    admin_verified = verify_admin_access()
+
+
+    if not admin_verified:
+
+        st.warning(
+            "Administrator privileges could not be verified. "
+            "Please log in again."
+        )
+
+    else:
+
+        admin_section = st.radio(
+            "Select Administration Section",
+            options=[
+                "Master File",
+                "User Management"
+            ],
+            horizontal=True,
+            key="admin_navigation"
+        )
+
+
+        # ====================================================
+        #                  MASTER FILE
+        # ====================================================
+
+        if admin_section == "Master File":
+
+            show_master_file_admin_panel()
+
+
+        # ====================================================
+        #                  USER MANAGEMENT
+        # ====================================================
+
+        elif admin_section == "User Management":
+
+            show_user_management_panel()
+        # ============================================================
+#              PART 4 — MASTER FILE PROCESSING
+# ============================================================
+
+
+# ============================================================
+#              DOWNLOAD CURRENT MASTER FILE
+# ============================================================
+
+def download_current_master_file():
+
+    # --------------------------------------------------------
+    # Verify logged-in user
+    # --------------------------------------------------------
+
+    if not st.session_state.authenticated:
+
+        return (
+            None,
+            "You must be logged in."
+        )
+
+
+    try:
+
+        # ----------------------------------------------------
+        # Check that master file exists
+        # ----------------------------------------------------
+
+        if not master_file_available():
+
+            return (
+                None,
+                "No master file is currently available."
+            )
+
+
+        # ----------------------------------------------------
+        # Download from private Supabase Storage
+        # ----------------------------------------------------
+
+        file_bytes = (
+            supabase
+            .storage
+            .from_(STORAGE_BUCKET)
+            .download(
+                MASTER_STORAGE_PATH
+            )
+        )
+
+
+        if not file_bytes:
+
+            return (
+                None,
+                "The master file could not be downloaded."
+            )
+
+
+        # ----------------------------------------------------
+        # Validate downloaded workbook
+        # ----------------------------------------------------
+
+        try:
+
+            workbook = load_workbook(
+                io.BytesIO(file_bytes),
+                read_only=True,
+                data_only=False
+            )
+
+            workbook.close()
+
+        except Exception:
+
+            return (
+                None,
+                "The stored master file is not a valid "
+                "Excel workbook."
+            )
+
+
+        return (
+            file_bytes,
+            None
+        )
+
+
+    except Exception as e:
+
+        return (
+            None,
+            f"Unable to download master file: {e}"
+        )
+    # ============================================================
+#              LOAD MASTER WORKBOOK
+# ============================================================
+
+def load_current_master_workbook():
+
+    # --------------------------------------------------------
+    # Download master workbook
+    # --------------------------------------------------------
+
+    file_bytes, error_message = (
+        download_current_master_file()
+    )
+
+
+    if error_message:
+
+        return (
+            None,
+            None,
+            error_message
+        )
+
+
+    if not file_bytes:
+
+        return (
+            None,
+            None,
+            "Master file is empty."
+        )
+
+
+    # --------------------------------------------------------
+    # Load workbook into memory
+    # --------------------------------------------------------
+
+    try:
+
+        workbook = load_workbook(
+            io.BytesIO(
+                file_bytes
+            ),
+            read_only=False,
+            data_only=False
+        )
+
+
+    except Exception as e:
+
+        return (
+            None,
+            None,
+            f"Unable to open master workbook: {e}"
+        )
+
+
+    # --------------------------------------------------------
+    # Safety check — workbook must contain worksheets
+    # --------------------------------------------------------
+
+    sheet_names = (
+        workbook.sheetnames
+    )
+
+
+    if not sheet_names:
+
+        workbook.close()
+
+        return (
+            None,
+            None,
+            "Master workbook does not contain any worksheets."
+        )
+
+
+    # --------------------------------------------------------
+    # Return workbook + original bytes
+    # --------------------------------------------------------
+
+    return (
+        workbook,
+        file_bytes,
+        None
+    )
+    # ============================================================
+#              MASTER WORKBOOK SHEET INFORMATION
+# ============================================================
+
+def get_master_sheet_names():
+
+    workbook = None
+
+
+    try:
+
+        workbook, _, error_message = (
+            load_current_master_workbook()
+        )
+
+
+        if error_message:
+
+            return []
+
+
+        sheet_names = list(
+            workbook.sheetnames
+        )
+
+
+        workbook.close()
+
+
+        return sheet_names
+
+
+    except Exception:
+
+        if workbook is not None:
+
+            try:
+
+                workbook.close()
+
+            except Exception:
+
+                pass
+
+
+        return []
+    # ============================================================
+#              EXCEL PROCESSING FUNCTION
+# ============================================================
+
+def process_master_workbook(
+    master_bytes
+):
+
+    workbook = None
+
+    try:
+
+        # ----------------------------------------------------
+        # Validate input
+        # ----------------------------------------------------
+
+        if not master_bytes:
+
+            raise ValueError(
+                "Master workbook data is empty."
+            )
+
+
+        # ----------------------------------------------------
+        # Open master workbook
+        # ----------------------------------------------------
+
+        workbook = load_workbook(
+            io.BytesIO(
+                master_bytes
+            ),
+            read_only=False,
+            data_only=False
+        )
+
+
+        # ----------------------------------------------------
+        # Safety check
+        # ----------------------------------------------------
+
+        if not workbook.sheetnames:
+
+            raise ValueError(
+                "Master workbook contains no worksheets."
+            )
+
+
+        # ====================================================
+        # IMPORTANT
+        # ====================================================
+        #
+        # YOUR ORIGINAL WORKING EXCEL-PROCESSING CODE
+        # MUST RUN HERE.
+        #
+        # Do NOT replace your existing calculations,
+        # formulas, formatting, sorting, sheets, or output
+        # logic with newly invented logic.
+        #
+        # The existing workbook-processing code should use:
+        #
+        #     workbook
+        #
+        # as its input workbook.
+        #
+        # ====================================================
+
+
+        # ----------------------------------------------------
+        # Temporary safety return
+        # ----------------------------------------------------
+        #
+        # This prevents the app from pretending that an output
+        # has been generated before the original processing
+        # logic is connected.
+        # ----------------------------------------------------
+
+        raise NotImplementedError(
+            "Original Excel-processing logic has not yet "
+            "been connected."
+        )
+
+
+    except NotImplementedError:
+
+        raise
+
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"Excel processing failed: {e}"
+        )
+
+
+    finally:
+
+        if workbook is not None:
+
+            try:
+
+                workbook.close()
+
+            except Exception:
+
+                pass
+        # ============================================================
+#              GENERATE OUTPUT WORKBOOK
+# ============================================================
+
+def generate_output_workbook():
+
+    # --------------------------------------------------------
+    # Authentication check
+    # --------------------------------------------------------
+
+    if not st.session_state.authenticated:
+
+        return (
+            None,
+            "You must be logged in."
+        )
+
+
+    # --------------------------------------------------------
+    # Active-account check
+    # --------------------------------------------------------
+
+    try:
+
+        profile = get_user_profile(
+            get_user_id()
+        )
+
+
+        if not profile:
+
+            return (
+                None,
+                "User profile could not be verified."
+            )
+
+
+        if not profile.get(
+            "is_active",
+            True
+        ):
+
+            return (
+                None,
+                "Your account is disabled."
+            )
+
+
+    except Exception as e:
+
+        return (
+            None,
+            f"Unable to verify account: {e}"
+        )
+
+
+    # --------------------------------------------------------
+    # Load current master workbook
+    # --------------------------------------------------------
+
+    master_bytes, error_message = (
+        download_current_master_file()
+    )
+
+
+    if error_message:
+
+        return (
+            None,
+            error_message
+        )
+
+
+    if not master_bytes:
+
+        return (
+            None,
+            "No master workbook is available."
+        )
+
+
+    # --------------------------------------------------------
+    # Run the original Excel-processing logic
+    # --------------------------------------------------------
+
+    try:
+
+        output_bytes = process_master_workbook(
+            master_bytes
+        )
+
+
+        # ----------------------------------------------------
+        # Validate processing result
+        # ----------------------------------------------------
+
+        if not output_bytes:
+
+            return (
+                None,
+                "The processing function did not return "
+                "an output workbook."
+            )
+
+
+        if not isinstance(
+            output_bytes,
+            (
+                bytes,
+                bytearray
+            )
+        ):
+
+            return (
+                None,
+                "The processing function returned an "
+                "invalid output format."
+            )
+
+
+        # ----------------------------------------------------
+        # Validate generated Excel file
+        # ----------------------------------------------------
+
+        try:
+
+            test_workbook = load_workbook(
+                io.BytesIO(
+                    output_bytes
+                ),
+                read_only=True,
+                data_only=False
+            )
+
+
+            if not test_workbook.sheetnames:
+
+                test_workbook.close()
+
+                return (
+                    None,
+                    "Generated workbook contains no worksheets."
+                )
+
+
+            test_workbook.close()
+
+
+        except Exception:
+
+            return (
+                None,
+                "The generated output is not a valid "
+                "Excel workbook."
+            )
+
+
+        return (
+            bytes(output_bytes),
+            None
+        )
+
+
+    except NotImplementedError:
+
+        return (
+            None,
+            "The original Excel-processing code has not "
+            "yet been connected to the application."
+        )
+
+
+    except Exception as e:
+
+        return (
+            None,
+            f"Unable to generate output: {e}"
+        )
+# ============================================================
+#                  GENERATE OUTPUT PANEL
+# ============================================================
+
+def show_generate_panel():
+
+    st.divider()
+
+    st.header(
+        "Generate Output"
+    )
+
+
+    # --------------------------------------------------------
+    # Current master status
+    # --------------------------------------------------------
+
+    exists = refresh_master_status()
+
+
+    if not exists:
+
+        st.warning(
+            "No master file is currently available."
+        )
+
+        st.info(
+            "Please ask the administrator to upload "
+            "the master Excel file."
+        )
+
+        return
+
+
+    st.success(
+        f"Master file available: {MASTER_FILE_NAME}"
+    )
+
+
+    st.caption(
+        "The current master workbook will be processed "
+        "using the application's Excel-processing logic."
+    )
+
+
+    # --------------------------------------------------------
+    # Generate button
+    # --------------------------------------------------------
+
+    if st.button(
+        "Generate Output",
+        key="generate_output_button",
+        use_container_width=True,
+        type="primary"
+    ):
+
+        # Clear previous output
+
+        st.session_state.generated_output = None
+
+        st.session_state.generated_output_name = None
+
+        st.session_state.last_error = None
+
+
+        with st.spinner(
+            "Generating output workbook..."
+        ):
+
+            output_bytes, error_message = (
+                generate_output_workbook()
+            )
+
+
+        if error_message:
+
+            st.session_state.last_error = (
+                error_message
+            )
+
+            st.error(
+                error_message
+            )
+
+
+        else:
+
+            st.session_state.generated_output = (
+                output_bytes
+            )
+
+            st.session_state.generated_output_name = (
+                OUTPUT_FILE_NAME
+            )
+
+            st.session_state.last_error = None
+
+
+            st.success(
+                "Output workbook generated successfully."
+            )
+
+
+    # --------------------------------------------------------
+    # Download generated output
+    # --------------------------------------------------------
+
+    if st.session_state.generated_output:
+
+        st.divider()
+
+        st.subheader(
+            "Generated File"
+        )
+
+
+        st.download_button(
+            label="Download Output Excel",
+            data=st.session_state.generated_output,
+            file_name=(
+                st.session_state.generated_output_name
+                or OUTPUT_FILE_NAME
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="download_generated_output",
+            use_container_width=True
+        )
+    # ============================================================
+#                    USER DASHBOARD
+# ============================================================
+
+
+def show_user_dashboard():
+
+    # --------------------------------------------------------
+    # Authentication check
+    # --------------------------------------------------------
+
+    if not st.session_state.authenticated:
+
+        st.error(
+            "You must be logged in."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # Fresh account verification
+    # --------------------------------------------------------
+
+    user_id = get_user_id()
+
+    if not user_id:
+
+        st.error(
+            "Unable to identify the logged-in user."
+        )
+
+        return
+
+
+    profile = get_user_profile(
+        user_id
+    )
+
+
+    if not profile:
+
+        st.error(
+            "Unable to verify your user profile."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # Active account check
+    # --------------------------------------------------------
+
+    if not profile.get(
+        "is_active",
+        True
+    ):
+
+        st.error(
+            "Your account is disabled."
+        )
+
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.session = None
+        st.session_state.is_admin = False
+        st.session_state.profile = None
+
+        time.sleep(
+            0.5
+        )
+
+        st.rerun()
+
+        return
+
+
+    # --------------------------------------------------------
+    # User Dashboard
+    # --------------------------------------------------------
+
+    st.header(
+        "User Dashboard"
+    )
+
+    st.caption(
+        "View the current master file, generate the "
+        "latest output workbook, and download it."
+    )
+
+
+    # --------------------------------------------------------
+    # Master file status
+    # --------------------------------------------------------
+
+    exists = refresh_master_status()
+
+
+    col1, col2 = st.columns(
+        2
+    )
+
+
+    with col1:
+
+        if exists:
+
+            st.success(
+                "Master File Available"
+            )
+
+            st.caption(
+                f"Current file: {MASTER_FILE_NAME}"
+            )
+
+        else:
+
+            st.warning(
+                "Master File Not Available"
+            )
+
+            st.caption(
+                "Please contact the administrator."
+            )
+
+
+    # --------------------------------------------------------
+    # Refresh status
+    # --------------------------------------------------------
+
+    with col2:
+
+        if st.button(
+            "Refresh Master Status",
+            key="user_refresh_master_status",
+            use_container_width=True
+        ):
+
+            refresh_master_status()
+
+            st.rerun()
+
+
+    # --------------------------------------------------------
+    # Generate / Download
+    # --------------------------------------------------------
+
+    show_generate_panel()
+# ============================================================
+#                  NORMAL USER APPLICATION
+# ============================================================
+
+
+if (
+    st.session_state.authenticated
+    and
+    not st.session_state.is_admin
+):
+
+    show_user_dashboard()
+# ============================================================
+#                    ADMIN DASHBOARD
+# ============================================================
+
+
+def show_admin_dashboard():
+
+    # --------------------------------------------------------
+    # Authentication check
+    # --------------------------------------------------------
+
+    if not st.session_state.authenticated:
+
+        st.error(
+            "You must be logged in."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # Fresh administrator verification
+    # --------------------------------------------------------
+
+    if not verify_admin_access():
+
+        st.error(
+            "Administrator access could not be verified."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # Admin Dashboard
+    # --------------------------------------------------------
+
+    st.header(
+        "Administrator Dashboard"
+    )
+
+    st.success(
+        "ADMIN ACCESS"
+    )
+
+    st.caption(
+        "You have full administrator access to the "
+        "master workbook and user management."
+    )
+
+
+    # --------------------------------------------------------
+    # Current master status
+    # --------------------------------------------------------
+
+    exists = refresh_master_status()
+
+
+    if exists:
+
+        st.success(
+            f"Current Master File: {MASTER_FILE_NAME}"
+        )
+
+    else:
+
+        st.warning(
+            "No master file is currently available."
+        )
+
+
+    # --------------------------------------------------------
+    # Normal Generate / Download functionality
+    # --------------------------------------------------------
+
+    show_generate_panel()
+
+
+    # --------------------------------------------------------
+    # Administrator controls
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.header(
+        "Administrator Controls"
+    )
+
+
+    admin_section = st.radio(
+        "Select Administration Section",
+        options=[
+            "Master File",
+            "User Management"
+        ],
+        horizontal=True,
+        key="admin_dashboard_navigation"
+    )
+
+
+    if admin_section == "Master File":
+
+        show_master_file_admin_panel()
+
+
+    elif admin_section == "User Management":
+
+        show_user_management_panel()
+    # ============================================================
+#                  MAIN DASHBOARD ROUTING
+# ============================================================
+
+
+if st.session_state.authenticated:
+
+    if st.session_state.is_admin:
+
+        show_admin_dashboard()
+
+    else:
+
+        show_user_dashboard()
+    # ============================================================
+#                 FINAL SESSION SAFETY CHECK
+# ============================================================
+
+
+def final_session_safety_check():
+
+    # --------------------------------------------------------
+    # User must be authenticated
+    # --------------------------------------------------------
+
+    if not st.session_state.get(
+        "authenticated",
+        False
+    ):
+
+        return False
+
+
+    # --------------------------------------------------------
+    # Get current user
+    # --------------------------------------------------------
+
+    user_id = get_user_id()
+
+    if not user_id:
+
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.session = None
+        st.session_state.is_admin = False
+        st.session_state.profile = None
+
+        return False
+
+
+    # --------------------------------------------------------
+    # Fresh profile verification
+    # --------------------------------------------------------
+
+    try:
+
+        profile = get_user_profile(
+            user_id
+        )
+
+    except Exception:
+
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.session = None
+        st.session_state.is_admin = False
+        st.session_state.profile = None
+
+        return False
+
+
+    if not profile:
+
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.session = None
+        st.session_state.is_admin = False
+        st.session_state.profile = None
+
+        return False
+
+
+    # --------------------------------------------------------
+    # Active-account verification
+    # --------------------------------------------------------
+
+    if not profile.get(
+        "is_active",
+        True
+    ):
+
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.session = None
+        st.session_state.is_admin = False
+        st.session_state.profile = None
+
+        st.error(
+            "Your account is currently disabled."
+        )
+
+        return False
+
+
+    # --------------------------------------------------------
+    # Refresh role from database
+    # --------------------------------------------------------
+
+    role = str(
+        profile.get(
+            "role",
+            "user"
+        )
+    ).lower().strip()
+
+
+    if role not in ROLES:
+
+        role = "user"
+
+
+    st.session_state.profile = profile
+
+    st.session_state.is_admin = (
+        role == "admin"
+    )
+
+
+    return True
+# ============================================================
+#              EXECUTE FINAL SESSION CHECK
+# ============================================================
+
+
+if st.session_state.authenticated:
+
+    if not final_session_safety_check():
+
+        st.warning(
+            "Your session is no longer valid. "
+            "Please log in again."
+        )
+
+        time.sleep(
+            0.5
+        )
+
+        st.rerun()
+    # ============================================================
+#                  FINAL APPLICATION EXECUTION
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Final authentication/session validation
+# ------------------------------------------------------------
+
+if st.session_state.get(
+    "authenticated",
+    False
+):
+
+    if not final_session_safety_check():
+
+        st.stop()
+
+
+# ------------------------------------------------------------
+# Refresh master status for logged-in users
+# ------------------------------------------------------------
+
+if st.session_state.get(
+    "authenticated",
+    False
+):
+
+    try:
+
+        refresh_master_status()
+
+    except Exception:
+
+        st.session_state.master_file_exists = False
+        st.session_state.master_file_name = None
+
+
+# ------------------------------------------------------------
+# Main application
+# ------------------------------------------------------------
+
+if st.session_state.get(
+    "authenticated",
+    False
+):
+
+    # --------------------------------------------------------
+    # Administrator
+    # --------------------------------------------------------
+
+    if st.session_state.get(
+        "is_admin",
+        False
+    ):
+
+        show_admin_dashboard()
+
+
+    # --------------------------------------------------------
+    # Normal User
+    # --------------------------------------------------------
+
+    else:
+
+        show_user_dashboard()
+    # ============================================================
+#                  LOGOUT & SESSION CLEANUP
+# ============================================================
+
+
+def clear_local_session_state():
+
+    # --------------------------------------------------------
+    # Clear authentication information
+    # --------------------------------------------------------
+
+    st.session_state.user = None
+
+    st.session_state.session = None
+
+    st.session_state.profile = None
+
+    st.session_state.is_admin = False
+
+    st.session_state.authenticated = False
+
+
+    # --------------------------------------------------------
+    # Clear generated workbook
+    # --------------------------------------------------------
+
+    st.session_state.generated_output = None
+
+    st.session_state.generated_output_name = None
+
+
+    # --------------------------------------------------------
+    # Clear master-file status
+    # --------------------------------------------------------
+
+    st.session_state.master_file_exists = False
+
+    st.session_state.master_file_name = None
+
+
+    # --------------------------------------------------------
+    # Clear temporary error information
+    # --------------------------------------------------------
+
+    st.session_state.last_error = None
+
+
+def logout_user():
+
+    try:
+
+        # ----------------------------------------------------
+        # Sign out from Supabase Auth
+        # ----------------------------------------------------
+
+        supabase.auth.sign_out()
+
+    except Exception:
+
+        # ----------------------------------------------------
+        # Always clear local session even if Supabase
+        # reports an error during logout.
+        # ----------------------------------------------------
+
+        pass
+
+
+    # --------------------------------------------------------
+    # Clear Streamlit session
+    # --------------------------------------------------------
+
+    clear_local_session_state()
+
+
+    # --------------------------------------------------------
+    # Return to login screen
+    # --------------------------------------------------------
+
+    st.rerun()
+
+
+# ============================================================
+#                    SIDEBAR LOGOUT
+# ============================================================
+
+
+with st.sidebar:
+
+    st.divider()
+
+    if st.button(
+        "Logout",
+        key="sidebar_logout_button",
+        use_container_width=True
+    ):
+
+        logout_user()
+    # ============================================================
+#             PART 5 — EXCEL PROCESSING CONNECTION
+# ============================================================
+
+
+def process_master_workbook(
+    master_bytes
+):
+
+    workbook = None
+
+    try:
+
+        # --------------------------------------------------------
+        # Validate input
+        # --------------------------------------------------------
+
+        if not master_bytes:
+
+            raise ValueError(
+                "Master workbook data is empty."
+            )
+
+
+        # --------------------------------------------------------
+        # Open master workbook
+        # --------------------------------------------------------
+
+        workbook = load_workbook(
+            io.BytesIO(
+                master_bytes
+            ),
+            read_only=False,
+            data_only=False
+        )
+
+
+        # --------------------------------------------------------
+        # Validate worksheets
+        # --------------------------------------------------------
+
+        if not workbook.sheetnames:
+
+            raise ValueError(
+                "Master workbook contains no worksheets."
+            )
+
+
+        # ========================================================
+        # YOUR ORIGINAL WORKING EXCEL CODE GOES HERE
+        # ========================================================
+        #
+        # IMPORTANT:
+        #
+        # Do NOT change your existing Excel calculations.
+        #
+        # Your original code should:
+        #
+        # 1. Read the master workbook
+        # 2. Perform all existing calculations
+        # 3. Preserve all existing sheets/output
+        # 4. Add the requested columns/calculations
+        # 5. Create the final summary_output.xlsx
+        # 6. Save the resulting workbook into memory
+        #
+        # The final result MUST be returned as bytes.
+        #
+        # ========================================================
+
+
+        raise NotImplementedError(
+            "Your original working Excel-processing code "
+            "must be inserted here."
+        )
+
+
+    except NotImplementedError:
+
+        raise
+
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"Excel processing failed: {e}"
+        )
+
+
+    finally:
+
+        if workbook is not None:
+
+            try:
+
+                workbook.close()
+
+            except Exception:
+
+                pass
+        # ============================================================
+#        PART 5 — ORIGINAL EXCEL PROCESSOR CONNECTION
+# ============================================================
+
+
+def process_master_workbook(master_bytes):
+
+    if not master_bytes:
+
+        raise ValueError(
+            "Master workbook is empty."
+        )
+
+
+    # --------------------------------------------------------
+    # Open uploaded/current master workbook
+    # --------------------------------------------------------
+
+    input_buffer = io.BytesIO(
+        master_bytes
+    )
+
+
+    try:
+
+        source_workbook = load_workbook(
+            input_buffer,
+            read_only=False,
+            data_only=False
+        )
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"Unable to open master workbook: {e}"
+        )
+
+
+    try:
+
+        if not source_workbook.sheetnames:
+
+            raise ValueError(
+                "Master workbook contains no worksheets."
+            )
+
+
+        # ====================================================
+        # ORIGINAL WORKING EXCEL LOGIC
+        # ====================================================
+        #
+        # IMPORTANT:
+        #
+        # Your existing working Excel-processing code must
+        # be placed here without changing its calculations.
+        #
+        # It must ultimately create the final workbook in
+        # memory and return its bytes.
+        #
+        # Existing output requirements such as:
+        #
+        # - existing worksheets
+        # - existing formulas
+        # - existing columns
+        # - existing calculations
+        # - sorting
+        # - formatting
+        # - filters
+        # - Sum O2H.10
+        # - Sum O2L.10
+        # - Vol.Expand columns
+        # - all other existing output
+        #
+        # must remain unchanged.
+        #
+        # ====================================================
+
+
+        raise NotImplementedError(
+            "Original working Excel-processing code "
+            "has not yet been connected."
+        )
+
+
+    finally:
+
+        try:
+
+            source_workbook.close()
+
+        except Exception:
+
+            pass
+        ```sql
+-- ============================================================
+--        6thSense (6S-FO200) Vardaan
+--        SUPABASE DATABASE SECURITY / RLS
+-- ============================================================
+
+
+-- ============================================================
+-- 1. PROFILES TABLE
+-- ============================================================
+
+create table if not exists public.profiles (
+
+    id uuid primary key references auth.users(id) on delete cascade,
+
+    email text,
+
+    role text not null default 'user'
+        check (role in ('admin', 'user')),
+
+    is_active boolean not null default true,
+
+    created_at timestamptz not null default now()
+
+);
+
+
+-- ============================================================
+-- 2. MASTER FILE METADATA TABLE
+-- ============================================================
+
+create table if not exists public.master_file_metadata (
+
+    id bigint generated by default as identity primary key,
+
+    file_name text not null,
+
+    storage_path text not null unique,
+
+    file_size bigint,
+
+    file_hash text,
+
+    uploaded_by uuid references auth.users(id),
+
+    uploaded_at timestamptz not null default now()
+
+);
+
+
+-- ============================================================
+-- 3. ENABLE ROW LEVEL SECURITY
+-- ============================================================
+
+alter table public.profiles
+enable row level security;
+
+
+alter table public.master_file_metadata
+enable row level security;
+
+
+-- ============================================================
+-- 4. HELPER FUNCTION
+--    Check whether logged-in user is an ADMIN
+-- ============================================================
+
+create or replace function public.is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+
+    select exists (
+
+        select 1
+
+        from public.profiles
+
+        where id = auth.uid()
+
+        and role = 'admin'
+
+        and is_active = true
+
+    );
+
+$$;
+
+
+-- ============================================================
+-- 5. PROFILES POLICIES
+-- ============================================================
+
+
+-- Users can read their own profile.
+
+drop policy if exists
+"Users can read own profile"
+on public.profiles;
+
+
+create policy
+"Users can read own profile"
+
+on public.profiles
+
+for select
+
+to authenticated
+
+using (
+
+    id = auth.uid()
+
+    or public.is_admin()
+
+);
+
+
+-- Admin can update user roles/status.
+
+drop policy if exists
+"Admins can update profiles"
+on public.profiles;
+
+
+create policy
+"Admins can update profiles"
+
+on public.profiles
+
+for update
+
+to authenticated
+
+using (
+
+    public.is_admin()
+
+)
+
+with check (
+
+    public.is_admin()
+
+);
+
+
+-- ============================================================
+-- 6. MASTER FILE METADATA POLICIES
+-- ============================================================
+
+
+-- Logged-in users can see metadata.
+
+drop policy if exists
+"Authenticated users can read master metadata"
+on public.master_file_metadata;
+
+
+create policy
+"Authenticated users can read master metadata"
+
+on public.master_file_metadata
+
+for select
+
+to authenticated
+
+using (
+
+    true
+
+);
+
+
+-- Only administrators can insert metadata.
+
+drop policy if exists
+"Admins can insert master metadata"
+on public.master_file_metadata;
+
+
+create policy
+"Admins can insert master metadata"
+
+on public.master_file_metadata
+
+for insert
+
+to authenticated
+
+with check (
+
+    public.is_admin()
+
+);
+
+
+-- Only administrators can update metadata.
+
+drop policy if exists
+"Admins can update master metadata"
+on public.master_file_metadata;
+
+
+create policy
+"Admins can update master metadata"
+
+on public.master_file_metadata
+
+for update
+
+to authenticated
+
+using (
+
+    public.is_admin()
+
+)
+
+with check (
+
+    public.is_admin()
+
+);
+
+
+-- Only administrators can delete metadata.
+
+drop policy if exists
+"Admins can delete master metadata"
+on public.master_file_metadata;
+
+
+create policy
+"Admins can delete master metadata"
+
+on public.master_file_metadata
+
+for delete
+
+to authenticated
+
+using (
+
+    public.is_admin()
+
+);
+
+
+-- ============================================================
+-- 7. IMPORTANT
+-- ============================================================
+--
+-- DO NOT PUT THE SUPABASE SERVICE_ROLE KEY
+-- INSIDE STREAMLIT SECRETS.
+--
+-- The Streamlit application must use only the
+-- normal Supabase client key.
+--
+-- ============================================================
+```sql
+-- ============================================================
+--        6thSense (6S-FO200) Vardaan
+--        SUPABASE STORAGE SECURITY
+-- ============================================================
+
+
+-- ============================================================
+-- 1. CREATE STORAGE BUCKET
+-- ============================================================
+--
+-- The bucket is PRIVATE.
+-- Users will NOT get a public URL to the master file.
+--
+
+insert into storage.buckets
+(
+    id,
+    name,
+    public
+)
+
+values
+(
+    'master-files',
+    'master-files',
+    false
+)
+
+on conflict (id)
+do update set
+    public = false;
+
+
+-- ============================================================
+-- 2. STORAGE RLS
+-- ============================================================
+
+-- Logged-in users can DOWNLOAD the master file.
+--
+-- This is intentionally limited to authenticated users.
+--
+
+drop policy if exists
+"Authenticated users can download master file"
+on storage.objects;
+
+
+create policy
+"Authenticated users can download master file"
+
+on storage.objects
+
+for select
+
+to authenticated
+
+using
+(
+    bucket_id = 'master-files'
+);
+
+
+-- ============================================================
+-- 3. ONLY ADMIN CAN UPLOAD
+-- ============================================================
+
+drop policy if exists
+"Admins can upload master file"
+on storage.objects;
+
+
+create policy
+"Admins can upload master file"
+
+on storage.objects
+
+for insert
+
+to authenticated
+
+with check
+(
+    bucket_id = 'master-files'
+
+    and public.is_admin()
+);
+
+
+-- ============================================================
+-- 4. ONLY ADMIN CAN UPDATE / REPLACE
+-- ============================================================
+
+drop policy if exists
+"Admins can replace master file"
+on storage.objects;
+
+
+create policy
+"Admins can replace master file"
+
+on storage.objects
+
+for update
+
+to authenticated
+
+using
+(
+    bucket_id = 'master-files'
+
+    and public.is_admin()
+)
+
+with check
+(
+    bucket_id = 'master-files'
+
+    and public.is_admin()
+);
+
+
+-- ============================================================
+-- 5. ONLY ADMIN CAN DELETE
+-- ============================================================
+
+drop policy if exists
+"Admins can delete master file"
+on storage.objects;
+
+
+create policy
+"Admins can delete master file"
+
+on storage.objects
+
+for delete
+
+to authenticated
+
+using
+(
+    bucket_id = 'master-files'
+
+    and public.is_admin()
+);
+
+
+-- ============================================================
+-- 6. IMPORTANT SECURITY NOTE
+-- ============================================================
+--
+-- The bucket MUST remain PRIVATE.
+--
+-- Normal users:
+--     ✓ Can download through the authenticated application
+--     ✓ Can view master-file status
+--     ✓ Can generate output
+--     ✓ Can download generated output
+--     ✗ Cannot upload
+--     ✗ Cannot replace
+--     ✗ Cannot delete
+--
+-- Administrators:
+--     ✓ Upload
+--     ✓ Replace
+--     ✓ Delete
+--     ✓ Manage users
+--
+-- NEVER make the master-files bucket public.
+--
+-- NEVER put the Supabase service_role key in:
+--     Streamlit secrets
+--     GitHub
+--     app.py
+--     requirements.txt
+--     browser/client code
+--
+-- ============================================================
+
+
+
+    
