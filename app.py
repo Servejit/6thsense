@@ -2926,10 +2926,10 @@ with col1:
             else:
 
                 st.error(
-                    message
-                )
+                            message
+        )
 
-     st.divider()
+    st.divider()
 
     if st.button(
         "Send Telegram Test"
