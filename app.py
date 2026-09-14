@@ -567,7 +567,6 @@ def get_user_role(user_id):
         if not profile.get(
             "is_active",
             True
-          True
         ):
 
             return None
